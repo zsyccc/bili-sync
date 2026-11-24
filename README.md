@@ -45,10 +45,13 @@ bili-sync 是一款专为 NAS 用户编写的哔哩哔哩同步工具，由 Rust
 | 环境变量 | 用途 |
 | --- | --- |
 | `BILI_SYNC_REFRESH_MULTIPART_BVIDS` | 逗号分隔的 BV 号。每轮检查已启用来源中的对应视频。 |
+| `BILI_SYNC_REFRESH_REPLACED_FIRST_BVIDS` | 逗号分隔的 BV 号。允许这些视频从已下载的单 P 变为多 P 时，把替换后的 P1 加入下载队列。 |
 | `BILI_SYNC_REFRESH_MULTIPART_UPLOADER_MIDS` | 逗号分隔的 UP 主数字 UID。轮流检查这些 UP 主在已启用来源里已收录且符合下载规则的视频。 |
 | `BILI_SYNC_REFRESH_MULTIPART_UPLOADER_BUDGET` | 每轮按 UP 主检查的视频数上限，默认 10，范围 1–100。明确指定的 BV 号不占此额度。 |
 
-当数据库已有分 P 的顺序和 CID 与 B 站列表开头完全一致时，程序会登记新增分 P 并交给正常下载流程。分 P 被替换、重排或删除时，日志会列出不匹配，供人工核对。已下载的文件和完成状态会保留。单 P 变为多 P 时，已有 P1 沿用原路径，新增分 P 使用 `Season 1` 目录。
+当数据库已有分 P 的顺序和 CID 与 B 站列表开头完全一致时，程序会登记新增分 P 并交给正常下载流程。已有分 P 的路径和下载状态会保留。单 P 变为多 P 时，CID 一致的 P1 沿用原路径，新增分 P 使用 `Season 1` 目录。
+
+单 P 变为多 P 且旧 CID 已从 B 站分 P 列表消失时，可将对应 BV 加入 `BILI_SYNC_REFRESH_REPLACED_FIRST_BVIDS`。程序会把当前 P1 和后续分集保存到 `Season 1`，旧 P1 文件留在原位置，视频详情显示新版 P1。旧 P1 已归档到其他位置时，也可根据数据库中已完成的下载记录执行。其他替换、重排或删除情况会在日志中显示，供人工核对。
 
 按 UP 主检查的游标保存在进程内存中，重启后从最早的记录重新扫描。如果有正在追更的 BV，可单独填写该 BV，每轮直接检查。
 

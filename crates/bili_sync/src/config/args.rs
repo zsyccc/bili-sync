@@ -28,6 +28,10 @@ pub struct Args {
     #[arg(long, env = "BILI_SYNC_REFRESH_MULTIPART_BVIDS", value_delimiter = ',')]
     pub refresh_multipart_bvids: Vec<String>,
 
+    /// Comma-separated BVIDs allowed to queue a new first part on single-to-multipart conversion.
+    #[arg(long, env = "BILI_SYNC_REFRESH_REPLACED_FIRST_BVIDS", value_delimiter = ',')]
+    pub refresh_replaced_first_bvids: Vec<String>,
+
     /// Comma-separated uploader MIDs whose eligible videos are checked in rotation.
     #[arg(long, env = "BILI_SYNC_REFRESH_MULTIPART_UPLOADER_MIDS", value_delimiter = ',', value_parser = clap::value_parser!(i64).range(1..))]
     pub refresh_multipart_uploader_mids: Vec<i64>,

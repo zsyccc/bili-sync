@@ -60,7 +60,6 @@ pub async fn process_video_source(
         &video_source,
         connection,
         &config.credential,
-        &ARGS.refresh_multipart_bvids,
         uploader_audit_ids,
     )
     .await?;

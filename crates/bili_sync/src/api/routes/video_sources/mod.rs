@@ -197,8 +197,13 @@ pub async fn get_video_sources_default_path(
 pub async fn update_video_source(
     Path((source_type, id)): Path<(String, i32)>,
     Extension(db): Extension<DatabaseConnection>,
-    ValidatedJson(request): ValidatedJson<UpdateVideoSourceRequest>,
+    request: Result<ValidatedJson<UpdateVideoSourceRequest>, ApiError>,
 ) -> Result<ApiResponse<UpdateVideoSourceResponse>, ApiError> {
+    let ValidatedJson(request) = if source_type == "submissions" {
+        request.map_err(ApiError::json_as_bad_request)?
+    } else {
+        request?
+    };
     let rule_display = request.rule.as_ref().map(|rule| rule.to_string());
     let active_model = match source_type.as_str() {
         "collections" => collection::Entity::find_by_id(id).one(&db).await?.map(|model| {
@@ -509,8 +514,9 @@ pub async fn insert_collection(
 pub async fn insert_submission(
     Extension(db): Extension<DatabaseConnection>,
     Extension(bili_client): Extension<Arc<BiliClient>>,
-    ValidatedJson(request): ValidatedJson<InsertSubmissionRequest>,
+    request: Result<ValidatedJson<InsertSubmissionRequest>, ApiError>,
 ) -> Result<ApiResponse<bool>, ApiError> {
+    let ValidatedJson(request) = request.map_err(ApiError::json_as_bad_request)?;
     let credential = &VersionedConfig::get().read().credential;
     let submission = Submission::new(bili_client.as_ref(), request.upper_id.to_string(), credential);
     let upper = submission.get_info().await?;
@@ -529,12 +535,54 @@ pub async fn insert_submission(
 
 #[cfg(test)]
 mod tests {
-    use axum::body::to_bytes;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
     use axum::response::IntoResponse;
     use bili_sync_migration::{Migrator, MigratorTrait};
     use sea_orm::Database;
+    use tower::ServiceExt;
 
     use super::*;
+
+    #[tokio::test]
+    async fn submission_quota_api_rejects_invalid_edits_as_bad_requests() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        db.execute_unprepared(
+            "INSERT INTO submission (id, upper_id, upper_name, path, daily_download_limit)
+             VALUES (1, 101, 'one', '/one', 5)",
+        )
+        .await
+        .unwrap();
+        let app = router().layer(Extension(db.clone()));
+
+        for (field, value) in [
+            ("dailyDownloadLimit", -1),
+            ("daily_download_limit", i64::from(u32::MAX) + 1),
+        ] {
+            let mut payload = serde_json::json!({"path": "/changed", "enabled": true});
+            payload[field] = value.into();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::put("/video-sources/submissions/1")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(payload.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["status_code"], 400);
+            assert!(body["message"].as_str().unwrap().contains(field));
+
+            let source = submission::Entity::find_by_id(1).one(&db).await.unwrap().unwrap();
+            assert_eq!(source.daily_download_limit, 5);
+            assert_eq!(source.path, "/one");
+        }
+    }
 
     #[tokio::test]
     async fn submission_quota_api_preserves_omitted_updates_and_accepts_zero() {
@@ -573,7 +621,7 @@ mod tests {
             update_video_source(
                 Path(("submissions".to_string(), 1)),
                 Extension(db.clone()),
-                ValidatedJson(serde_json::from_value(request).unwrap()),
+                Ok(ValidatedJson(serde_json::from_value(request).unwrap())),
             )
             .await
             .unwrap_or_else(|_| panic!("submission update failed"));

@@ -75,6 +75,15 @@ impl<T: Serialize> IntoResponse for ApiResponse<T> {
 
 pub struct ApiError(Error);
 
+impl ApiError {
+    pub(crate) fn json_as_bad_request(self) -> Self {
+        match self.0.downcast_ref::<JsonRejection>() {
+            Some(rejection) => InnerApiError::BadRequest(rejection.body_text()).into(),
+            None => self,
+        }
+    }
+}
+
 impl<E> From<E> for ApiError
 where
     E: Into<anyhow::Error>,

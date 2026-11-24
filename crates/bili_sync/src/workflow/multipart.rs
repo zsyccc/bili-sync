@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -26,21 +26,25 @@ fn exact_bvids() -> impl Iterator<Item = &'static str> {
         .map(String::as_str)
 }
 
-pub(crate) async fn select_uploader_audit_batch(
+fn enabled_source_scope(sources: &[VideoSourceEnum]) -> Condition {
+    sources
+        .iter()
+        .fold(Condition::any(), |scope, source| scope.add(source.filter_expr()))
+}
+
+async fn select_uploader_audit_batch(
     connection: &DatabaseConnection,
-    sources: &[VideoSourceEnum],
+    scope: Condition,
+    bvids: &HashSet<&str>,
 ) -> Result<Vec<i32>> {
-    if ARGS.refresh_multipart_uploader_mids.is_empty() || sources.is_empty() {
+    if ARGS.refresh_multipart_uploader_mids.is_empty() {
         return Ok(Vec::new());
     }
-    let source_filter = sources
-        .iter()
-        .fold(Condition::any(), |scope, source| scope.add(source.filter_expr()));
     let ids = select_uploader_candidates(
         connection,
-        source_filter,
+        scope,
         &ARGS.refresh_multipart_uploader_mids,
-        &exact_bvids().collect::<Vec<_>>(),
+        bvids,
         ARGS.refresh_multipart_uploader_budget,
         UPLOADER_CURSOR.load(Ordering::Relaxed),
     )
@@ -56,7 +60,7 @@ async fn select_uploader_candidates(
     connection: &DatabaseConnection,
     sources: Condition,
     mids: &[i64],
-    exact_bvids: &[&str],
+    exact_bvids: &HashSet<&str>,
     budget: u16,
     cursor: i32,
 ) -> Result<Vec<i32>> {
@@ -96,33 +100,25 @@ fn eligible_videos() -> Select<video::Entity> {
         .filter(video::Column::SinglePage.is_not_null())
 }
 
-pub(super) async fn refresh_tracked_video_pages(
+pub(crate) async fn refresh_tracked_video_pages(
     bili_client: &BiliClient,
-    video_source: &VideoSourceEnum,
+    sources: &[VideoSourceEnum],
     connection: &DatabaseConnection,
     credential: &Credential,
-    uploader_ids: &[i32],
 ) -> Result<()> {
     let bvids = exact_bvids().collect::<HashSet<_>>();
-    if bvids.is_empty() && uploader_ids.is_empty() {
+    if sources.is_empty() || (bvids.is_empty() && ARGS.refresh_multipart_uploader_mids.is_empty()) {
         return Ok(());
     }
 
-    let mut candidates = eligible_videos()
-        .select_only()
-        .columns([video::Column::Id, video::Column::Bvid])
-        .filter(video_source.filter_expr())
-        .filter(
-            Condition::any()
-                .add(video::Column::Bvid.is_in(bvids.iter().copied()))
-                .add(video::Column::Id.is_in(uploader_ids.iter().copied())),
-        )
-        .into_tuple::<(i32, String)>()
-        .all(connection)
-        .await?;
-    candidates.sort_by_key(|(id, bvid)| (!bvids.contains(bvid.as_str()), *id));
+    let scope = enabled_source_scope(sources);
+    let uploader_ids = select_uploader_audit_batch(connection, scope.clone(), &bvids).await?;
+    if bvids.is_empty() && uploader_ids.is_empty() {
+        return Ok(());
+    }
+    let candidates = select_tracked_candidates(connection, scope, &bvids, &uploader_ids).await?;
 
-    for (id, bvid) in candidates {
+    for (bvid, video_ids) in candidates {
         let pages = match Video::new(bili_client, &bvid, credential).get_pages().await {
             Ok(pages) => pages,
             Err(error) => {
@@ -132,24 +128,54 @@ pub(super) async fn refresh_tracked_video_pages(
                 {
                     return Err(error);
                 }
-                warn!("检查视频 {bvid} ({id}) 的新增分 P 失败：{error:#}");
+                warn!("检查视频 {bvid} 的新增分 P 失败：{error:#}");
                 continue;
             }
         };
         let allow_replacement = ARGS.refresh_replaced_first_bvids.contains(&bvid);
-        let added = reconcile_video_pages(connection, id, pages, allow_replacement).await?;
-        if added > 0 {
-            info!("视频 {bvid} ({id}) 有 {added} 个分 P 已加入下载队列");
+        for id in video_ids {
+            let added = reconcile_video_pages(connection, id, &pages, allow_replacement).await?;
+            if added > 0 {
+                info!("视频 {bvid} ({id}) 有 {added} 个分 P 已加入下载队列");
+            }
         }
     }
 
     Ok(())
 }
 
+async fn select_tracked_candidates(
+    connection: &DatabaseConnection,
+    scope: Condition,
+    bvids: &HashSet<&str>,
+    uploader_ids: &[i32],
+) -> Result<Vec<(String, Vec<i32>)>> {
+    let candidates = eligible_videos()
+        .select_only()
+        .columns([video::Column::Id, video::Column::Bvid])
+        .filter(scope)
+        .filter(
+            Condition::any()
+                .add(video::Column::Bvid.is_in(bvids.iter().copied()))
+                .add(video::Column::Id.is_in(uploader_ids.iter().copied())),
+        )
+        .order_by_asc(video::Column::Id)
+        .into_tuple::<(i32, String)>()
+        .all(connection)
+        .await?;
+    let mut groups = HashMap::<String, Vec<i32>>::new();
+    for (id, bvid) in candidates {
+        groups.entry(bvid).or_default().push(id);
+    }
+    let mut groups = groups.into_iter().collect::<Vec<_>>();
+    groups.sort_by_key(|(bvid, ids)| (!bvids.contains(bvid.as_str()), ids[0]));
+    Ok(groups)
+}
+
 async fn reconcile_video_pages(
     connection: &DatabaseConnection,
     video_id: i32,
-    remote: Vec<PageInfo>,
+    remote: &[PageInfo],
     allow_replacement: bool,
 ) -> Result<usize> {
     let txn = connection.begin().await?;
@@ -167,12 +193,12 @@ async fn reconcile_video_pages(
         .await?;
 
     let replacement = allow_replacement
-        .then(|| replaced_first_page(&video, &local, &remote))
+        .then(|| replaced_first_page(&video, &local, remote))
         .flatten();
     let added = match if replacement.is_some() {
-        validate_remote_pages(&remote).map(|()| remote.len())
+        validate_remote_pages(remote).map(|()| remote.len())
     } else {
-        appended_pages(&local, &remote)
+        appended_pages(&local, remote)
     } {
         Ok(0) => return Ok(0),
         Ok(added) => added,
@@ -186,10 +212,11 @@ async fn reconcile_video_pages(
             return Ok(0);
         }
     };
-    let mut remote_pages = remote.into_iter();
+    let mut remote_pages = remote.iter();
     if let Some(previous) = replacement {
         let mut current = remote_pages
             .next()
+            .cloned()
             .context("missing replacement P1")?
             .into_active_model(video_id);
         current.id = Set(previous.id);
@@ -198,6 +225,7 @@ async fn reconcile_video_pages(
     }
     let new_pages = remote_pages
         .skip(if replacement.is_some() { 0 } else { local.len() })
+        .cloned()
         .map(|page| page.into_active_model(video_id))
         .collect();
     create_pages(new_pages, &txn).await?;
@@ -331,7 +359,7 @@ mod tests {
         let first = first.insert(&db).await?;
 
         assert_eq!(
-            reconcile_video_pages(&db, video.id, remote_pages(&[101, 102, 103]), true).await?,
+            reconcile_video_pages(&db, video.id, &remote_pages(&[101, 102, 103]), true).await?,
             2
         );
         let updated = video::Entity::find_by_id(video.id).one(&db).await?.unwrap();
@@ -350,19 +378,19 @@ mod tests {
         assert_eq!(pages[2].path, None);
 
         assert_eq!(
-            reconcile_video_pages(&db, video.id, remote_pages(&[101, 102, 103]), false).await?,
+            reconcile_video_pages(&db, video.id, &remote_pages(&[101, 102, 103]), false).await?,
             0
         );
         assert_eq!(
-            reconcile_video_pages(&db, video.id, remote_pages(&[101, 999, 103, 104]), true).await?,
+            reconcile_video_pages(&db, video.id, &remote_pages(&[101, 999, 103, 104]), true).await?,
             0
         );
         assert_eq!(
-            reconcile_video_pages(&db, video.id, remote_pages(&[101, 102]), true).await?,
+            reconcile_video_pages(&db, video.id, &remote_pages(&[101, 102]), true).await?,
             0
         );
         assert_eq!(
-            reconcile_video_pages(&db, video.id, remote_pages(&[101, 102, 103, 103]), true).await?,
+            reconcile_video_pages(&db, video.id, &remote_pages(&[101, 102, 103, 103]), true).await?,
             0
         );
         assert_eq!(
@@ -378,7 +406,7 @@ mod tests {
         updated.download_status = Set(completed_video);
         updated.update(&db).await?;
         assert_eq!(
-            reconcile_video_pages(&db, video.id, remote_pages(&[101, 102, 103, 104]), true).await?,
+            reconcile_video_pages(&db, video.id, &remote_pages(&[101, 102, 103, 104]), true).await?,
             1
         );
         let updated = video::Entity::find_by_id(video.id).one(&db).await?.unwrap();
@@ -421,23 +449,23 @@ mod tests {
             let old_first = old_first.insert(&db).await?;
 
             assert_eq!(
-                reconcile_video_pages(&db, id, remote_pages(&[101, 102]), false).await?,
+                reconcile_video_pages(&db, id, &remote_pages(&[101, 102]), false).await?,
                 0
             );
-            assert_eq!(reconcile_video_pages(&db, id, remote_pages(&[101]), true).await?, 0);
+            assert_eq!(reconcile_video_pages(&db, id, &remote_pages(&[101]), true).await?, 0);
             assert_eq!(
-                reconcile_video_pages(&db, id, remote_pages(&[101, 100]), true).await?,
+                reconcile_video_pages(&db, id, &remote_pages(&[101, 100]), true).await?,
                 0
             );
             let mut malformed = remote_pages(&[101, 102]);
             malformed[1].page = 3;
-            assert_eq!(reconcile_video_pages(&db, id, malformed, true).await?, 0);
+            assert_eq!(reconcile_video_pages(&db, id, &malformed, true).await?, 0);
 
             let mut video: video::ActiveModel = old_video.clone().into();
             video.should_download = Set(false);
             let mut video: video::ActiveModel = video.update(&db).await?.into();
             assert_eq!(
-                reconcile_video_pages(&db, id, remote_pages(&[101, 102]), true).await?,
+                reconcile_video_pages(&db, id, &remote_pages(&[101, 102]), true).await?,
                 0
             );
             video.should_download = Set(true);
@@ -448,7 +476,7 @@ mod tests {
             )
             .await?;
             assert!(
-                reconcile_video_pages(&db, id, remote_pages(&[101, 102]), true)
+                reconcile_video_pages(&db, id, &remote_pages(&[101, 102]), true)
                     .await
                     .is_err()
             );
@@ -457,7 +485,7 @@ mod tests {
             db.execute_unprepared("DROP TRIGGER reject_p2").await?;
 
             assert_eq!(
-                reconcile_video_pages(&db, id, remote_pages(&[101, 102, 103]), true).await?,
+                reconcile_video_pages(&db, id, &remote_pages(&[101, 102, 103]), true).await?,
                 3
             );
             let updated = video::Entity::find_by_id(id).one(&db).await?.unwrap();
@@ -478,11 +506,11 @@ mod tests {
             assert!(!page_uses_single_layout(false, new_first, video_path));
 
             assert_eq!(
-                reconcile_video_pages(&db, id, remote_pages(&[101, 102, 103]), true).await?,
+                reconcile_video_pages(&db, id, &remote_pages(&[101, 102, 103]), true).await?,
                 0
             );
             assert_eq!(
-                reconcile_video_pages(&db, id, remote_pages(&[999, 102, 103]), true).await?,
+                reconcile_video_pages(&db, id, &remote_pages(&[999, 102, 103]), true).await?,
                 0
             );
             assert_eq!(
@@ -549,7 +577,7 @@ mod tests {
         let sources = Condition::any()
             .add(video::Column::FavoriteId.eq(1))
             .add(video::Column::FavoriteId.eq(2));
-        let exact = ["BV-audit-3"];
+        let exact = HashSet::from(["BV-audit-3"]);
         let mids = [1234];
         assert_eq!(
             select_uploader_candidates(&db, sources.clone(), &mids, &exact, 2, 0).await?,
@@ -564,8 +592,77 @@ mod tests {
             [8, 2, 5]
         );
         assert_eq!(
-            select_uploader_candidates(&db, sources, &mids, &[], 8, 0).await?,
+            select_uploader_candidates(&db, sources, &mids, &HashSet::new(), 8, 0).await?,
             [2, 3, 5, 8]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepass_groups_exact_bv_references_across_enabled_sources() -> Result<()> {
+        use bili_sync_entity::favorite;
+
+        let db = test_database().await?;
+        let enabled_sources = [1, 2].map(|id| {
+            favorite::Model {
+                id,
+                f_id: i64::from(id),
+                name: String::new(),
+                path: String::new(),
+                created_at: String::new(),
+                latest_row_at: Default::default(),
+                rule: None,
+                enabled: true,
+            }
+            .into()
+        });
+        for (id, source_id, bvid, should_download) in [
+            (1, 1, "BV-uploader", true),
+            (2, 1, "BV-exact", true),
+            (3, 3, "BV-exact", true),
+            (4, 2, "BV-exact", true),
+            (5, 2, "BV-other", true),
+            (6, 2, "BV-denied", false),
+        ] {
+            video::ActiveModel::from(video::Model {
+                id,
+                bvid: bvid.to_owned(),
+                favorite_id: Some(source_id),
+                category: 2,
+                valid: true,
+                should_download,
+                single_page: Some(true),
+                ..Default::default()
+            })
+            .insert(&db)
+            .await?;
+            remote_pages(&[100]).remove(0).into_active_model(id).insert(&db).await?;
+        }
+
+        let groups = select_tracked_candidates(
+            &db,
+            enabled_source_scope(&enabled_sources),
+            &HashSet::from(["BV-exact", "BV-denied"]),
+            &[1],
+        )
+        .await?;
+        assert_eq!(
+            groups,
+            [("BV-exact".to_owned(), vec![2, 4]), ("BV-uploader".to_owned(), vec![1])]
+        );
+
+        let snapshot = remote_pages(&[100, 200]);
+        for &id in &groups[0].1 {
+            assert_eq!(reconcile_video_pages(&db, id, &snapshot, false).await?, 1);
+        }
+        let affected = page::Entity::find()
+            .filter(page::Column::Pid.eq(2))
+            .order_by_asc(page::Column::VideoId)
+            .all(&db)
+            .await?;
+        assert_eq!(
+            affected.iter().map(|p| (p.video_id, p.cid)).collect::<Vec<_>>(),
+            [(2, 200), (4, 200)]
         );
         Ok(())
     }

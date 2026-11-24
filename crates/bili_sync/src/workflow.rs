@@ -1,6 +1,6 @@
 mod multipart;
 
-pub(crate) use multipart::select_uploader_audit_batch;
+pub(crate) use multipart::refresh_tracked_video_pages;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -43,7 +43,6 @@ pub async fn process_video_source(
     connection: &DatabaseConnection,
     template: &handlebars::Handlebars<'_>,
     config: &Config,
-    uploader_audit_ids: &[i32],
 ) -> Result<()> {
     // 预创建视频源目录，提前检测目录是否可写
     video_source.create_dir_all().await?;
@@ -55,14 +54,6 @@ pub async fn process_video_source(
     refresh_video_source(&video_source, video_streams, connection).await?;
     // 单独请求视频详情接口，获取视频的详情信息与所有的分页，写入数据库
     fetch_video_details(bili_client, &video_source, connection, config).await?;
-    multipart::refresh_tracked_video_pages(
-        bili_client,
-        &video_source,
-        connection,
-        &config.credential,
-        uploader_audit_ids,
-    )
-    .await?;
     if ARGS.scan_only {
         warn!("已开启仅扫描模式，跳过视频下载..");
     } else {

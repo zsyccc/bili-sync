@@ -13,7 +13,7 @@ use crate::bilibili::{self, BiliClient, BiliError};
 use crate::config::{ARGS, Config, TEMPLATE, Trigger, VersionedConfig};
 use crate::utils::model::get_enabled_video_sources;
 use crate::utils::notify::error_and_notify;
-use crate::workflow::{process_video_source, select_uploader_audit_batch};
+use crate::workflow::{process_video_source, refresh_tracked_video_pages};
 
 static INSTANCE: OnceCell<DownloadTaskManager> = OnceCell::const_new();
 
@@ -353,19 +353,18 @@ async fn download_video(
     if video_sources.is_empty() {
         bail!("没有可用的视频源");
     }
-    let uploader_audit_ids = select_uploader_audit_batch(connection, &video_sources).await?;
+    if let Err(e) = refresh_tracked_video_pages(&bili_client, &video_sources, connection, &config.credential).await {
+        if e.downcast_ref::<BiliError>()
+            .is_some_and(BiliError::is_risk_control_related)
+        {
+            warn!("检测到风控，终止此轮视频下载任务..");
+            return Err(e).context("检查已收录视频的新增分 P 失败");
+        }
+        warn!("检查已收录视频的新增分 P 失败，继续处理视频源：{e:#}");
+    }
     for video_source in video_sources {
         let display_name = video_source.display_name();
-        if let Err(e) = process_video_source(
-            video_source,
-            &bili_client,
-            connection,
-            &template,
-            config,
-            &uploader_audit_ids,
-        )
-        .await
-        {
+        if let Err(e) = process_video_source(video_source, &bili_client, connection, &template, config).await {
             error_and_notify(
                 config,
                 &bili_client,

@@ -1,3 +1,7 @@
+mod multipart;
+
+pub(crate) use multipart::select_uploader_audit_batch;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -30,6 +34,8 @@ use crate::utils::notify::notify;
 use crate::utils::rule::FieldEvaluatable;
 use crate::utils::status::{PageStatus, STATUS_OK, VideoStatus};
 
+const VIDEO_PAGE_STATUS_OFFSET: usize = 4;
+
 /// 完整地处理某个视频来源
 pub async fn process_video_source(
     video_source: VideoSourceEnum,
@@ -37,6 +43,7 @@ pub async fn process_video_source(
     connection: &DatabaseConnection,
     template: &handlebars::Handlebars<'_>,
     config: &Config,
+    uploader_audit_ids: &[i32],
 ) -> Result<()> {
     // 预创建视频源目录，提前检测目录是否可写
     video_source.create_dir_all().await?;
@@ -48,6 +55,15 @@ pub async fn process_video_source(
     refresh_video_source(&video_source, video_streams, connection).await?;
     // 单独请求视频详情接口，获取视频的详情信息与所有的分页，写入数据库
     fetch_video_details(bili_client, &video_source, connection, config).await?;
+    multipart::refresh_tracked_video_pages(
+        bili_client,
+        &video_source,
+        connection,
+        &config.credential,
+        &ARGS.refresh_multipart_bvids,
+        uploader_audit_ids,
+    )
+    .await?;
     if ARGS.scan_only {
         warn!("已开启仅扫描模式，跳过视频下载..");
     } else {
@@ -393,6 +409,13 @@ pub async fn dispatch_download_page(
     Ok(ExecutionStatus::Fixed(target_status))
 }
 
+fn page_uses_single_layout(video_is_single: bool, page_model: &page::Model, video_path: &Path) -> bool {
+    // 视频增加分 P 后，已经落盘的 P1 继续沿用原先的单页路径和元数据格式。
+    video_is_single
+        || (page_model.pid == 1
+            && page_model.path.as_deref().and_then(|path| Path::new(path).parent()) == Some(video_path))
+}
+
 /// 下载某个分页，未发生风控且正常运行时返回 Ok(Page::ActiveModel)，其中 status 字段存储了新的下载状态，发生风控时返回 DownloadAbortError
 pub async fn download_page(
     video_model: &video::Model,
@@ -404,7 +427,11 @@ pub async fn download_page(
     let _permit = semaphore.acquire().await.context("acquire semaphore failed")?;
     let mut status = PageStatus::from(page_model.download_status);
     let separate_status = status.should_run();
-    let is_single_page = video_model.single_page.context("single_page is null")?;
+    let is_single_page = page_uses_single_layout(
+        video_model.single_page.context("single_page is null")?,
+        &page_model,
+        base_path,
+    );
     // 未记录路径时填充，已经填充过路径时使用现有的
     let (base_path, base_name) = if let Some(old_video_path) = &page_model.path
         && !old_video_path.is_empty()
@@ -418,7 +445,10 @@ pub async fn download_page(
             // 单页下的路径是 {base_path}/{base_name}.mp4
             (
                 old_video_path.parent().context("invalid page path format")?,
-                old_video_filename.trim_end_matches(".mp4").to_string(),
+                old_video_filename
+                    .strip_suffix(".mp4")
+                    .unwrap_or(&old_video_filename)
+                    .to_string(),
             )
         } else {
             // 多页下的路径是 {base_path}/Season 1/{base_name} - S01Exx.mp4
@@ -492,6 +522,7 @@ pub async fn download_page(
         // 下载分页封面
         fetch_page_poster(
             separate_status[0] && !cx.config.skip_option.no_poster,
+            is_single_page,
             video_model,
             &page_model,
             poster_path,
@@ -503,6 +534,7 @@ pub async fn download_page(
         // 生成分页视频信息的 nfo
         generate_page_nfo(
             separate_status[2] && !cx.config.skip_option.no_video_nfo,
+            is_single_page,
             video_model,
             &page_model,
             nfo_path,
@@ -565,8 +597,9 @@ pub async fn download_page(
     Ok(page_active_model)
 }
 
-pub async fn fetch_page_poster(
+async fn fetch_page_poster(
     should_run: bool,
+    single_page: bool,
     video_model: &video::Model,
     page_model: &page::Model,
     poster_path: PathBuf,
@@ -576,7 +609,6 @@ pub async fn fetch_page_poster(
     if !should_run {
         return Ok(ExecutionStatus::Skipped);
     }
-    let single_page = video_model.single_page.context("single_page is null")?;
     let url = if single_page {
         // 单页视频直接用视频的封面
         video_model.cover.as_str()
@@ -692,8 +724,9 @@ pub async fn fetch_page_subtitle(
     Ok(ExecutionStatus::Succeeded)
 }
 
-pub async fn generate_page_nfo(
+async fn generate_page_nfo(
     should_run: bool,
+    single_page: bool,
     video_model: &video::Model,
     page_model: &page::Model,
     nfo_path: PathBuf,
@@ -702,7 +735,6 @@ pub async fn generate_page_nfo(
     if !should_run {
         return Ok(ExecutionStatus::Skipped);
     }
-    let single_page = video_model.single_page.context("single_page is null")?;
     let nfo = if single_page {
         NFO::Movie(video_model.to_nfo(cx.config.nfo_time_type))
     } else {

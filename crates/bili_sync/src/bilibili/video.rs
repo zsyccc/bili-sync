@@ -65,7 +65,6 @@ impl<'a> Video<'a> {
         Ok(serde_json::from_value(res["data"].take())?)
     }
 
-    #[cfg(test)]
     pub async fn get_pages(&self) -> Result<Vec<PageInfo>> {
         let mut res = self
             .client

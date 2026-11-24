@@ -23,6 +23,18 @@ pub struct Args {
 
     #[arg(short, long, env = "BILI_SYNC_FFMPEG_PATH")]
     pub ffmpeg_path: Option<String>,
+
+    /// Comma-separated BVIDs to check for newly appended video pages.
+    #[arg(long, env = "BILI_SYNC_REFRESH_MULTIPART_BVIDS", value_delimiter = ',')]
+    pub refresh_multipart_bvids: Vec<String>,
+
+    /// Comma-separated uploader MIDs whose eligible videos are checked in rotation.
+    #[arg(long, env = "BILI_SYNC_REFRESH_MULTIPART_UPLOADER_MIDS", value_delimiter = ',', value_parser = clap::value_parser!(i64).range(1..))]
+    pub refresh_multipart_uploader_mids: Vec<i64>,
+
+    /// Maximum uploader video checks per download round, across all enabled sources.
+    #[arg(long, env = "BILI_SYNC_REFRESH_MULTIPART_UPLOADER_BUDGET", default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..=100))]
+    pub refresh_multipart_uploader_budget: u16,
 }
 
 mod built_info {

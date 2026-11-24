@@ -28,6 +28,8 @@
 	import type { ApiError, VideoSourceDetail, VideoSourcesDetailsResponse, Rule } from '$lib/types';
 	import api from '$lib/api';
 	import RuleEditor from '$lib/components/rule-editor.svelte';
+	import DailyDownloadLimitInput from '$lib/components/daily-download-limit-input.svelte';
+	import { parseDailyDownloadLimit } from '$lib/utils';
 	import ListRestartIcon from '@lucide/svelte/icons/list-restart';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog/index.js';
 
@@ -71,6 +73,7 @@
 	let editForm = {
 		path: '',
 		enabled: false,
+		dailyDownloadLimit: '',
 		rule: null as Rule | null,
 		useDynamicApi: null as boolean | null
 	};
@@ -78,7 +81,7 @@
 	// 表单数据
 	let favoriteForm = { fid: '', path: '' };
 	let collectionForm = { sid: '', mid: '', collection_type: '2', path: '' }; // 默认为合集
-	let submissionForm = { upper_id: '', path: '' };
+	let submissionForm = { upper_id: '', path: '', dailyDownloadLimit: '' };
 
 	const TAB_CONFIG = {
 		favorites: { label: '收藏夹', icon: HeartIcon },
@@ -110,6 +113,7 @@
 		editForm = {
 			path: source.path,
 			enabled: source.enabled,
+			dailyDownloadLimit: source.dailyDownloadLimit ? String(source.dailyDownloadLimit) : '',
 			useDynamicApi: source.useDynamicApi,
 			rule: source.rule
 		};
@@ -177,11 +181,16 @@
 		}
 		saving = true;
 		try {
-			let response = await api.updateVideoSource(editingType, editingSource.id, {
+			const dailyDownloadLimit =
+				editingType === 'submissions'
+					? parseDailyDownloadLimit(editForm.dailyDownloadLimit)
+					: undefined;
+			const response = await api.updateVideoSource(editingType, editingSource.id, {
 				path: editForm.path,
 				enabled: editForm.enabled,
 				rule: editForm.rule,
-				useDynamicApi: editForm.useDynamicApi
+				useDynamicApi: editForm.useDynamicApi,
+				dailyDownloadLimit
 			});
 			// 更新本地数据
 			if (videoSourcesData && editingSource) {
@@ -194,6 +203,7 @@
 					enabled: editForm.enabled,
 					rule: editForm.rule,
 					useDynamicApi: editForm.useDynamicApi,
+					dailyDownloadLimit,
 					ruleDisplay: response.data.ruleDisplay
 				};
 				videoSourcesData = { ...videoSourcesData };
@@ -267,7 +277,7 @@
 		// 重置表单
 		favoriteForm = { fid: '', path: '' };
 		collectionForm = { sid: '', mid: '', collection_type: '2', path: '' };
-		submissionForm = { upper_id: '', path: '' };
+		submissionForm = { upper_id: '', path: '', dailyDownloadLimit: '' };
 		showAddDialog = true;
 	}
 
@@ -305,7 +315,8 @@
 					}
 					await api.insertSubmission({
 						upper_id: parseInt(submissionForm.upper_id),
-						path: submissionForm.path
+						path: submissionForm.path,
+						daily_download_limit: parseDailyDownloadLimit(submissionForm.dailyDownloadLimit)
 					});
 					break;
 			}
@@ -375,7 +386,14 @@
 								<Table.Body>
 									{#each sources as source, index (index)}
 										<Table.Row>
-											<Table.Cell class="font-medium">{source.name}</Table.Cell>
+											<Table.Cell class="font-medium">
+												<div>{source.name}</div>
+												{#if source.dailyDownloadLimit}
+													<div class="text-muted-foreground mt-1 text-xs font-normal">
+														每日最多 {source.dailyDownloadLimit} 条
+													</div>
+												{/if}
+											</Table.Cell>
 											<Table.Cell>
 												<div
 													class="bg-secondary hover:bg-secondary/80 flex w-fit cursor-text items-center gap-2 rounded-md px-2.5 py-1.5 transition-colors"
@@ -561,6 +579,14 @@
 						class="mt-2"
 					/>
 				</div>
+
+				{#if editingType === 'submissions'}
+					<DailyDownloadLimitInput
+						id="edit-daily-download-limit"
+						bind:value={editForm.dailyDownloadLimit}
+						disabled={saving}
+					/>
+				{/if}
 
 				<!-- 启用状态 -->
 				<div class="flex items-center space-x-2">
@@ -809,6 +835,13 @@
 					{/if}
 				</div>
 			</div>
+			{#if addDialogType === 'submissions'}
+				<DailyDownloadLimitInput
+					id="add-daily-download-limit"
+					bind:value={submissionForm.dailyDownloadLimit}
+					disabled={adding}
+				/>
+			{/if}
 			<div class="mt-6 flex justify-end gap-2">
 				<Button
 					variant="outline"

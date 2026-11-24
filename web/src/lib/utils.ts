@@ -16,6 +16,17 @@ export function cn(...inputs: ClassValue[]) {
 	return twMerge(clsx(inputs));
 }
 
+export function parseDailyDownloadLimit(value: string): number {
+	const input = value.trim();
+	if (input === '') return 0;
+
+	const limit = Number(input);
+	if (!/^\d+$/.test(input) || limit > 4294967295) {
+		throw new Error('每日下载上限请输入 0 到 4294967295 之间的整数');
+	}
+	return limit;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type WithoutChild<T> = T extends { child?: any } ? Omit<T, 'child'> : T;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -201,6 +201,7 @@ export interface InsertCollectionRequest {
 export interface InsertSubmissionRequest {
 	upper_id: number;
 	path: string;
+	daily_download_limit?: number;
 }
 
 export interface Condition<T> {
@@ -223,6 +224,7 @@ export interface VideoSourceDetail {
 	rule: Rule | null;
 	ruleDisplay: string | null;
 	useDynamicApi: boolean | null;
+	dailyDownloadLimit?: number;
 	enabled: boolean;
 	latestRowAt: string | null;
 }
@@ -239,6 +241,7 @@ export interface UpdateVideoSourceRequest {
 	enabled: boolean;
 	rule?: Rule | null;
 	useDynamicApi?: boolean | null;
+	dailyDownloadLimit?: number;
 }
 
 export interface Credential {

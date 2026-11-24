@@ -4,12 +4,106 @@ use futures::stream::FuturesUnordered;
 use prost::Message;
 use reqwest::Method;
 use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::bilibili::analyzer::PageAnalyzer;
 use crate::bilibili::client::BiliClient;
 use crate::bilibili::danmaku::{DanmakuElem, DanmakuWriter, DmSegMobileReply};
 use crate::bilibili::subtitle::{SubTitle, SubTitleBody, SubTitleInfo, SubTitlesInfo};
 use crate::bilibili::{Credential, ErrorForStatusExt, MIXIN_KEY, Validate, VideoInfo, WbiSign};
+
+fn bvid_to_aid(bvid: &str) -> Result<u64> {
+    const ALPHABET: &[u8] = b"FcwAPNKTMug3GV5Lj7EJnHpWsx4tb8haYeviqBz6rkCy12mUSDQX9RdoZf";
+    let mut bytes = bvid.as_bytes().to_vec();
+    ensure!(bytes.len() == 12 && bytes.starts_with(b"BV1"), "invalid BVID: {bvid}");
+    bytes.swap(3, 9);
+    bytes.swap(4, 7);
+    let mut value = 0_u64;
+    for byte in &bytes[3..] {
+        let digit = ALPHABET
+            .iter()
+            .position(|c| c == byte)
+            .with_context(|| format!("invalid BVID: {bvid}"))?;
+        value = value
+            .checked_mul(58)
+            .and_then(|v| v.checked_add(digit as u64))
+            .context("BVID overflow")?;
+    }
+    Ok((value & ((1_u64 << 51) - 1)) ^ 23_442_827_791_579)
+}
+
+/// Fetch page counts for up to 100 videos. Missing or invalid entries remain unknown.
+pub async fn get_batch_page_counts(
+    bili_client: &BiliClient,
+    credential: &Credential,
+    bvids: &[String],
+) -> Result<HashMap<String, usize>> {
+    ensure!(bvids.len() <= 100, "at most 100 BVIDs per request");
+    let requested: HashMap<_, _> = bvids
+        .iter()
+        .filter_map(|bvid| bvid_to_aid(bvid).ok().map(|aid| (bvid.as_str(), aid)))
+        .collect();
+    if requested.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let resources = requested
+        .values()
+        .map(|aid| format!("{aid}:2"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let response = bili_client
+        .request(
+            Method::GET,
+            "https://api.bilibili.com/x/v3/fav/resource/infos",
+            credential,
+        )
+        .await
+        .query(&[("resources", resources.as_str()), ("platform", "web")])
+        .send()
+        .await?
+        .error_for_status_ext()?
+        .json::<Value>()
+        .await?
+        .validate()?;
+    let entries = response["data"]
+        .as_array()
+        .context("resource infos data is not an array")?;
+    let mut counts = HashMap::new();
+    for entry in entries {
+        let Some(bvid) = entry["bvid"].as_str() else { continue };
+        let Some(&aid) = requested.get(bvid) else { continue };
+        if !entry["id"].is_null() && entry["id"].as_u64() != Some(aid) {
+            continue;
+        }
+        let Some(count) = entry["page"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .filter(|&n| n > 0)
+        else {
+            continue;
+        };
+        counts.insert(bvid.to_owned(), count);
+    }
+    Ok(counts)
+}
+
+#[cfg(test)]
+mod batch_page_count_tests {
+    use super::bvid_to_aid;
+
+    #[test]
+    fn converts_bvids_to_aids() {
+        for (bvid, aid) in [
+            ("BV1AHxZ6vEEQ", 117559865251529),
+            ("BV16mtU6kEu9", 117201587737721),
+            ("BV1iCs26dEaE", 117636855760495),
+            ("BV17x411w7KC", 170001),
+        ] {
+            assert_eq!(bvid_to_aid(bvid).unwrap(), aid);
+        }
+        assert!(bvid_to_aid("invalid").is_err());
+    }
+}
 
 pub struct Video<'a> {
     client: &'a BiliClient,

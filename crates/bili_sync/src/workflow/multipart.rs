@@ -1,3 +1,5 @@
+mod library;
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -107,16 +109,19 @@ pub(crate) async fn refresh_tracked_video_pages(
     credential: &Credential,
 ) -> Result<()> {
     let bvids = exact_bvids().collect::<HashSet<_>>();
-    if sources.is_empty() || (bvids.is_empty() && ARGS.refresh_multipart_uploader_mids.is_empty()) {
+    if sources.is_empty()
+        || (bvids.is_empty() && ARGS.refresh_multipart_uploader_mids.is_empty() && !ARGS.refresh_multipart_library)
+    {
         return Ok(());
     }
 
     let scope = enabled_source_scope(sources);
     let uploader_ids = select_uploader_audit_batch(connection, scope.clone(), &bvids).await?;
-    if bvids.is_empty() && uploader_ids.is_empty() {
-        return Ok(());
-    }
-    let candidates = select_tracked_candidates(connection, scope, &bvids, &uploader_ids).await?;
+    let candidates = if bvids.is_empty() && uploader_ids.is_empty() {
+        Vec::new()
+    } else {
+        select_tracked_candidates(connection, scope.clone(), &bvids, &uploader_ids).await?
+    };
 
     for (bvid, video_ids) in candidates {
         let pages = match Video::new(bili_client, &bvid, credential).get_pages().await {
@@ -141,6 +146,16 @@ pub(crate) async fn refresh_tracked_video_pages(
         }
     }
 
+    if ARGS.refresh_multipart_library {
+        library::refresh_library(
+            bili_client,
+            connection,
+            credential,
+            scope,
+            ARGS.refresh_multipart_library_budget as usize,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -314,7 +329,7 @@ mod tests {
 
     use super::*;
 
-    async fn test_database() -> Result<DatabaseConnection> {
+    pub(super) async fn test_database() -> Result<DatabaseConnection> {
         let mut connection = ConnectOptions::new("sqlite::memory:");
         connection.max_connections(1);
         let db = Database::connect(connection).await?;
@@ -322,7 +337,7 @@ mod tests {
         Ok(db)
     }
 
-    fn remote_pages(cids: &[i64]) -> Vec<PageInfo> {
+    pub(super) fn remote_pages(cids: &[i64]) -> Vec<PageInfo> {
         cids.iter()
             .enumerate()
             .map(|(index, &cid)| PageInfo {

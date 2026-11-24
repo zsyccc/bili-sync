@@ -218,6 +218,8 @@ pub struct VideoSourceDetail {
     pub rule_display: Option<String>,
     #[serde(default)]
     pub use_dynamic_api: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_download_limit: Option<u32>,
     pub enabled: bool,
     pub latest_row_at: Option<DateTime>,
 }

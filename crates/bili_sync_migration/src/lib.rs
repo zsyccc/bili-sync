@@ -11,6 +11,7 @@ mod m20250712_080013_add_video_created_at_index;
 mod m20250903_094454_add_rule_and_should_download;
 mod m20251009_123713_add_use_dynamic_api;
 mod m20260324_055217_add_staff;
+mod m20261124_000001_submission_daily_download_limit;
 
 pub struct Migrator;
 
@@ -29,6 +30,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20250903_094454_add_rule_and_should_download::Migration),
             Box::new(m20251009_123713_add_use_dynamic_api::Migration),
             Box::new(m20260324_055217_add_staff::Migration),
+            Box::new(m20261124_000001_submission_daily_download_limit::Migration),
         ]
     }
 }

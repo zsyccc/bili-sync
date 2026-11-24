@@ -39,6 +39,14 @@ pub struct Args {
     /// Maximum uploader video checks per download round, across all enabled sources.
     #[arg(long, env = "BILI_SYNC_REFRESH_MULTIPART_UPLOADER_BUDGET", default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..=100))]
     pub refresh_multipart_uploader_budget: u16,
+
+    /// Rotate through stored videos in every enabled source and check for appended pages.
+    #[arg(long, env = "BILI_SYNC_REFRESH_MULTIPART_LIBRARY")]
+    pub refresh_multipart_library: bool,
+
+    /// Maximum stored video rows checked by the library scan in one download round.
+    #[arg(long, env = "BILI_SYNC_REFRESH_MULTIPART_LIBRARY_BUDGET", default_value_t = 500, value_parser = clap::value_parser!(u32).range(1..))]
+    pub refresh_multipart_library_budget: u32,
 }
 
 mod built_info {

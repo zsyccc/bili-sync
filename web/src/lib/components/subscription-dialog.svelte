@@ -3,6 +3,8 @@
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
 	import { toast } from 'svelte-sonner';
+	import DailyDownloadLimitInput from '$lib/components/daily-download-limit-input.svelte';
+	import { parseDailyDownloadLimit } from '$lib/utils';
 	import {
 		Sheet,
 		SheetContent,
@@ -29,6 +31,7 @@
 	let { open = $bindable(false), item = null, onSuccess = null }: Props = $props();
 
 	let customPath = $state('');
+	let dailyDownloadLimit = $state('');
 	let loading = $state(false);
 
 	// 根据类型和 item 生成默认路径
@@ -101,7 +104,8 @@
 				case 'upper': {
 					const request: InsertSubmissionRequest = {
 						upper_id: item.mid,
-						path: customPath.trim()
+						path: customPath.trim(),
+						daily_download_limit: parseDailyDownloadLimit(dailyDownloadLimit)
 					};
 					response = await api.insertSubmission(request);
 					break;
@@ -133,6 +137,7 @@
 
 	$effect(() => {
 		if (open && item) {
+			dailyDownloadLimit = '';
 			generateDefaultPath()
 				.then((path) => {
 					customPath = path;
@@ -146,8 +151,8 @@
 		}
 	});
 
-	const typeLabel = getTypeLabel();
-	const itemTitle = getItemTitle();
+	let typeLabel = $derived(getTypeLabel());
+	let itemTitle = $derived(getItemTitle());
 </script>
 
 <Sheet bind:open>
@@ -169,15 +174,15 @@
 							<span class="text-muted-foreground text-sm font-medium">{typeLabel}名称：</span>
 							<span class="text-sm">{itemTitle}</span>
 						</div>
-						{#if item!.type !== 'upper'}
+						{#if item && item.type !== 'upper'}
 							<div class="flex items-center gap-2">
 								<span class="text-muted-foreground text-sm font-medium">视频数量：</span>
-								<span class="text-sm">{item!.media_count} 条</span>
+								<span class="text-sm">{item.media_count} 条</span>
 							</div>
-						{:else if item!.sign}
+						{:else if item?.type === 'upper' && item.sign}
 							<div class="flex items-start gap-2">
 								<span class="text-muted-foreground text-sm font-medium">个人简介：</span>
-								<span class="text-muted-foreground text-sm">{item!.sign}</span>
+								<span class="text-muted-foreground text-sm">{item.sign}</span>
 							</div>
 						{/if}
 					</div>
@@ -207,6 +212,13 @@
 						</div>
 					</div>
 				</div>
+				{#if item?.type === 'upper'}
+					<DailyDownloadLimitInput
+						id="subscribe-daily-download-limit"
+						bind:value={dailyDownloadLimit}
+						disabled={loading}
+					/>
+				{/if}
 			</div>
 		</div>
 

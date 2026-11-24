@@ -18,7 +18,7 @@ pub use me::Me;
 use once_cell::sync::Lazy;
 use reqwest::{RequestBuilder, StatusCode};
 pub use submission::Submission;
-pub use video::{Dimension, PageInfo, Video};
+pub use video::{Dimension, PageInfo, Video, get_batch_page_counts};
 pub use watch_later::WatchLater;
 
 mod analyzer;

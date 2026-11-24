@@ -127,6 +127,8 @@ pub struct InsertCollectionRequest {
 #[derive(Deserialize, Validate)]
 pub struct InsertSubmissionRequest {
     pub upper_id: i64,
+    #[serde(alias = "dailyDownloadLimit")]
+    pub daily_download_limit: Option<u32>,
     #[validate(custom(function = "crate::utils::validation::validate_path"))]
     pub path: String,
 }
@@ -139,6 +141,8 @@ pub struct UpdateVideoSourceRequest {
     pub enabled: bool,
     pub rule: Option<Rule>,
     pub use_dynamic_api: Option<bool>,
+    #[serde(alias = "daily_download_limit")]
+    pub daily_download_limit: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]

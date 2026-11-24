@@ -1,4 +1,5 @@
 mod multipart;
+mod submission_download_limit;
 
 pub(crate) use multipart::refresh_tracked_video_pages;
 
@@ -35,6 +36,7 @@ use crate::utils::rule::FieldEvaluatable;
 use crate::utils::status::{PageStatus, STATUS_OK, VideoStatus};
 
 const VIDEO_PAGE_STATUS_OFFSET: usize = 4;
+const PAGE_MEDIA_STATUS_OFFSET: usize = 1;
 
 /// 完整地处理某个视频来源
 pub async fn process_video_source(
@@ -222,7 +224,7 @@ pub async fn download_unprocessed_videos(
             futures::future::ready(risk_control_related_error.is_none())
         })
         // 过滤掉没有触发风控的普通 Err，只保留正确返回的 Model
-        .filter_map(|res| futures::future::ready(res.ok()))
+        .filter_map(|res| futures::future::ready(res.ok().flatten()))
         // 将成功返回的 Model 按十个一组合并
         .chunks(10);
     let mut download_notify_info = DownloadNotifyInfo::new(video_source.display_name().into());
@@ -243,7 +245,7 @@ pub async fn download_video_pages(
     semaphore: &Semaphore,
     upper_uids: Vec<i64>,
     cx: DownloadContext<'_>,
-) -> Result<video::ActiveModel> {
+) -> Result<Option<video::ActiveModel>> {
     let _permit = semaphore.acquire().await.context("acquire semaphore failed")?;
     let mut status = VideoStatus::from(video_model.download_status);
     let separate_status = status.should_run();
@@ -256,10 +258,43 @@ pub async fn download_video_pages(
                 .path_safe_render("video", &video_format_args(&video_model, &cx.config.time_format))?,
         )
     };
+    let is_single_page = video_model.single_page.context("single_page is null")?;
+    if let VideoSourceEnum::Submission(source) = cx.video_source
+        && source.daily_download_limit > 0
+        && submission_download_limit::has_pending_media_download(
+            separate_status[VIDEO_PAGE_STATUS_OFFSET],
+            &page_models,
+        )
+    {
+        match submission_download_limit::claim_download(
+            cx.connection,
+            source.id,
+            || chrono::Local::now().date_naive(),
+            &video_model.bvid,
+            source.daily_download_limit,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                debug!(
+                    "投稿 {} 已达每日下载上限，视频 {} 保持排队",
+                    source.upper_name, video_model.bvid
+                );
+                return Ok(None);
+            }
+            Err(error) => {
+                error!(
+                    "记录投稿 {} 视频 {} 的下载配额失败，保持排队：{error:#}",
+                    source.upper_name, video_model.bvid
+                );
+                return Ok(None);
+            }
+        }
+    }
     fs::create_dir_all(&base_path).await?;
 
     let base_path = dunce::canonicalize(base_path).context("canonicalize video path failed")?;
-    let is_single_page = video_model.single_page.context("single_page is null")?;
     let uppers_with_path = video_model
         .uppers()
         .filter_map(|u| {
@@ -342,7 +377,7 @@ pub async fn download_video_pages(
     let mut video_active_model: video::ActiveModel = video_model.into();
     video_active_model.download_status = Set(status.into());
     video_active_model.path = Set(base_path.to_string_lossy().to_string());
-    Ok(video_active_model)
+    Ok(Some(video_active_model))
 }
 
 /// 分发并执行分页下载任务，当且仅当所有分页成功下载或达到最大重试次数时返回 Ok，否则根据失败原因返回对应的错误
@@ -520,7 +555,13 @@ pub async fn download_page(
             cx
         ),
         // 下载分页视频
-        fetch_page_video(separate_status[1], video_model, &page_info, &video_path, cx),
+        fetch_page_video(
+            separate_status[PAGE_MEDIA_STATUS_OFFSET],
+            video_model,
+            &page_info,
+            &video_path,
+            cx,
+        ),
         // 生成分页视频信息的 nfo
         generate_page_nfo(
             separate_status[2] && !cx.config.skip_option.no_video_nfo,

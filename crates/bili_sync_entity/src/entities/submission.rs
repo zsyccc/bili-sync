@@ -14,6 +14,7 @@ pub struct Model {
     pub path: String,
     pub created_at: String,
     pub use_dynamic_api: bool,
+    pub daily_download_limit: u32,
     pub latest_row_at: DateTime,
     pub rule: Option<Rule>,
     pub enabled: bool,

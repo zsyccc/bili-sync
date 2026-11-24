@@ -130,6 +130,7 @@ pub async fn get_video_sources_details(
                 submission::Column::Enabled,
                 submission::Column::Rule,
                 submission::Column::UseDynamicApi,
+                submission::Column::DailyDownloadLimit,
                 submission::Column::LatestRowAt
             ])
             .into_model::<VideoSourceDetail>()
@@ -155,6 +156,7 @@ pub async fn get_video_sources_details(
             rule: None,
             rule_display: None,
             use_dynamic_api: None,
+            daily_download_limit: None,
             enabled: false,
             latest_row_at: None,
         })
@@ -220,6 +222,9 @@ pub async fn update_video_source(
             active_model.rule = Set(request.rule);
             if let Some(use_dynamic_api) = request.use_dynamic_api {
                 active_model.use_dynamic_api = Set(use_dynamic_api);
+            }
+            if let Some(limit) = request.daily_download_limit {
+                active_model.daily_download_limit = Set(limit);
             }
             _ActiveModel::Submission(active_model)
         }),
@@ -512,6 +517,7 @@ pub async fn insert_submission(
     submission::Entity::insert(submission::ActiveModel {
         upper_id: Set(upper.mid.parse()?),
         upper_name: Set(upper.name),
+        daily_download_limit: Set(request.daily_download_limit.unwrap_or_default()),
         path: Set(request.path),
         enabled: Set(false),
         ..Default::default()
@@ -519,4 +525,66 @@ pub async fn insert_submission(
     .exec(&db)
     .await?;
     Ok(ApiResponse::ok(true))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse;
+    use bili_sync_migration::{Migrator, MigratorTrait};
+    use sea_orm::Database;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn submission_quota_api_preserves_omitted_updates_and_accepts_zero() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        db.execute_unprepared("INSERT INTO submission (id, upper_id, upper_name, path) VALUES (1, 101, 'one', '/one')")
+            .await
+            .unwrap();
+
+        let insert: InsertSubmissionRequest = serde_json::from_value(serde_json::json!({
+            "upper_id": 101,
+            "path": "/one"
+        }))
+        .unwrap();
+        assert_eq!(insert.daily_download_limit, None);
+        assert!(
+            serde_json::from_value::<InsertSubmissionRequest>(serde_json::json!({
+                "upper_id": 101,
+                "path": "/one",
+                "daily_download_limit": -1
+            }))
+            .is_err()
+        );
+
+        for (request, expected) in [
+            (
+                serde_json::json!({"path": "/one", "enabled": true, "dailyDownloadLimit": 5}),
+                5,
+            ),
+            (serde_json::json!({"path": "/new-path", "enabled": true}), 5),
+            (
+                serde_json::json!({"path": "/new-path", "enabled": true, "daily_download_limit": 0}),
+                0,
+            ),
+        ] {
+            update_video_source(
+                Path(("submissions".to_string(), 1)),
+                Extension(db.clone()),
+                ValidatedJson(serde_json::from_value(request).unwrap()),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("submission update failed"));
+            let response = get_video_sources_details(Extension(db.clone()))
+                .await
+                .unwrap_or_else(|_| panic!("source details failed"))
+                .into_response();
+            let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["data"]["submissions"][0]["dailyDownloadLimit"], expected);
+            assert!(body["data"]["watch_later"][0].get("dailyDownloadLimit").is_none());
+        }
+    }
 }

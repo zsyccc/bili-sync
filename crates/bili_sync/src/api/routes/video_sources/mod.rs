@@ -525,7 +525,7 @@ pub async fn insert_submission(
         upper_name: Set(upper.name),
         daily_download_limit: Set(request.daily_download_limit.unwrap_or_default()),
         path: Set(request.path),
-        enabled: Set(false),
+        enabled: Set(true),
         ..Default::default()
     })
     .exec(&db)
